@@ -1,3 +1,87 @@
-sudo dpkg -i escape-xrpl-1.0.0.deb
-sudo apt-get install -f  # Pour résoudre les dépendances manquantes
-# 
+Installation d'ESCAPE XRP Ledger Tool
+Option 1 : Installation automatique (recommandée)
+Français
+Ouvrez un terminal et exécutez la commande suivante :
+bash
+
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/safevision/ESCAPE-XRPL/main/install_remote.sh)"
+
+Cette commande téléchargera et installera automatiquement ESCAPE XRP sur votre système.
+English
+Open a terminal and run the following command:
+bash
+
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/safevision/ESCAPE-XRPL/main/install_remote.sh)"
+
+This command will automatically download and install ESCAPE XRP on your system.
+Option 2 : Installation manuelle
+Français
+
+    Téléchargez le code source :
+    bash
+
+git clone https://github.com/safevision/ESCAPE-XRPL.git
+
+Accédez au répertoire :
+bash
+
+cd ESCAPE-XRPL
+
+Exécutez le script d'installation :
+bash
+
+    sudo ./install_escape.sh
+
+English
+
+    Download the source code:
+    bash
+
+git clone https://github.com/safevision/ESCAPE-XRPL.git
+
+Navigate to the directory:
+bash
+
+cd ESCAPE-XRPL
+
+Run the installation script:
+bash
+
+    sudo ./install_escape.sh
+
+Utilisation / Usage
+Français
+Après l'installation, vous pouvez lancer ESCAPE XRP de deux façons :
+
+    En tapant escape-xrpl dans un terminal
+    En le trouvant dans le menu des applications de votre système
+
+English
+After installation, you can launch ESCAPE XRP in two ways:
+
+    By typing escape-xrpl in a terminal
+    By finding it in your system's application menu
+
+Signaler des problèmes / Report Issues
+Français
+Si vous rencontrez des problèmes, veuillez les signaler à : [Votre email ou lien vers les issues GitHub]
+English
+If you encounter any problems, please report them to: [Your email or GitHub issues link]
+Configuration requise / System Requirements
+Français
+
+    Distribution Linux basée sur Debian (Ubuntu, Parrot OS, etc.)
+    Python 3.6 ou supérieur
+    Connexion Internet (pour l'installation des dépendances)
+
+English
+
+    Debian-based Linux distribution (Ubuntu, Parrot OS, etc.)
+    Python 3.6 or higher
+    Internet connection (for installing dependencies)
+
+Notes de sécurité / Security Notes
+Français
+ESCAPE XRP est conçu pour une utilisation sécurisée avec le XRP Ledger. Veuillez vous assurer que vous utilisez la version officielle téléchargée depuis notre dépôt GitHub.
+English
+ESCAPE XRP is designed for secure use with the XRP Ledger. Please ensure you are using the official version downloaded from our GitHub repository.
