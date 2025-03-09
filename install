@@ -1,0 +1,3 @@
+sudo dpkg -i escape-xrpl-1.0.0.deb
+sudo apt-get install -f  # Pour résoudre les dépendances manquantes
+# 
