@@ -1,0 +1,927 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ESCAPE – XRP Ledger Emergency Access Tool
+A secure wallet access tool integrating hybrid connections (WSS and JSON‑RPC)
+with a modern, intuitive interface.
+"""
+
+import os
+import base64
+import json
+import random
+import math
+import time
+import threading
+import logging
+import secrets
+import asyncio
+import websockets
+from datetime import datetime
+from itertools import cycle
+from typing import Optional, Dict, Any, List, Callable
+
+# XRPL imports
+from xrpl.clients import JsonRpcClient
+from xrpl.wallet import Wallet
+from xrpl.models.transactions import Payment
+
+# Cryptography imports
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
+from cryptography.fernet import Fernet
+
+# GUI imports
+import tkinter as tk
+from tkinter import messagebox
+from PIL import Image, ImageTk
+
+# Logging configuration
+logging.basicConfig(
+    filename='xrpl_app.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("ESCAPE")
+
+# XRPL endpoints
+WEBSOCKET_URLS = [
+    "wss://s1.ripple.com/",
+    "wss://s2.ripple.com/",
+    "wss://xrplcluster.com/"
+]
+
+JSON_RPC_URLS = [
+    "https://s1.ripple.com:51234/",
+    "https://s2.ripple.com:51234/",
+    "https://xrplcluster.com:51234/"
+]
+
+
+def generate_key(seed: str, salt: bytes) -> bytes:
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+        backend=default_backend()
+    )
+    return base64.urlsafe_b64encode(kdf.derive(seed.encode()))
+
+def encrypt_data(data: str, seed: str) -> bytes:
+    salt = os.urandom(16)
+    key = generate_key(seed, salt)
+    fernet = Fernet(key)
+    encrypted = fernet.encrypt(data.encode())
+    return salt + encrypted
+
+def decrypt_data(encrypted_data: bytes, seed: str) -> str:
+    salt = encrypted_data[:16]
+    actual_encrypted = encrypted_data[16:]
+    key = generate_key(seed, salt)
+    fernet = Fernet(key)
+    decrypted = fernet.decrypt(actual_encrypted)
+    return decrypted.decode()
+
+def parse_response(response: Any) -> Dict[str, Any]:
+    if isinstance(response, dict):
+        return response.get("result", response)
+    elif hasattr(response, "result"):
+        res = response.result
+        return res if isinstance(res, dict) else {"result": res}
+    elif hasattr(response, "to_dict"):
+        try:
+            return response.to_dict()
+        except Exception as e:
+            logger.error(f"Error calling to_dict: {e}")
+            raise
+    elif hasattr(response, "__dict__"):
+        return response.__dict__
+    else:
+        raise ValueError(f"Unsupported response type: {type(response)}")
+
+def reliable_submission(signed_tx, json_client, timeout=60):
+    submission_response = json_client.submit_transaction(signed_tx)
+    result = parse_response(submission_response)
+    if result.get("engine_result") != "tesSUCCESS":
+        raise Exception(f"Transaction submission error: {result.get('engine_result_message','')}")
+    tx_json = result.get("tx_json", {})
+    tx_hash = tx_json.get("hash")
+    if not tx_hash:
+        raise Exception("Unable to determine transaction hash.")
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            check_tx_req = {
+                "method": "tx",
+                "params": [{"transaction": tx_hash, "binary": False}]
+            }
+            tx_response = json_client.request(check_tx_req)
+            tx_result = parse_response(tx_response)
+            if tx_result.get("validated", False):
+                return tx_result
+        except Exception:
+            pass
+        time.sleep(2)
+    raise TimeoutError("Transaction was not validated within the timeout period.")
+
+
+
+class NetworkAnimation:
+    def __init__(self, canvas, width, height):
+        self.canvas = canvas
+        self.width = width
+        self.height = height
+        self.nodes = []
+        self.node_count = 15
+        self.connection_distance = 150
+        self.speed = 1
+        self.active_nodes = 0
+        
+        # Création des nœuds avec positions et états aléatoires
+        for _ in range(self.node_count):
+            node = {
+                'x': random.randint(0, self.width),
+                'y': random.randint(0, self.height),
+                'dx': random.choice([-1, 1]) * self.speed,
+                'dy': random.choice([-1, 1]) * self.speed,
+                'size': random.randint(2, 4),
+                'active': random.choice([True, False])
+            }
+            self.nodes.append(node)
+            
+    def update(self):
+        self.canvas.delete("all")
+        self.active_nodes = 0
+        # Mise à jour des positions et dessin des nœuds
+        for node in self.nodes:
+            node['x'] += node['dx']
+            node['y'] += node['dy']
+            if node['x'] < 0 or node['x'] > self.width:
+                node['dx'] *= -1
+            if node['y'] < 0 or node['y'] > self.height:
+                node['dy'] *= -1
+            if random.random() < 0.01:
+                node['active'] = not node['active']
+            color = "#00FF00" if node['active'] else "#003300"
+            if node['active']:
+                self.active_nodes += 1
+            self.canvas.create_oval(
+                node['x'] - node['size'],
+                node['y'] - node['size'],
+                node['x'] + node['size'],
+                node['y'] + node['size'],
+                fill=color, outline=color
+            )
+        # Dessin de lignes entre nœuds proches
+        for i, node1 in enumerate(self.nodes):
+            for node2 in self.nodes[i+1:]:
+                distance = math.sqrt((node1['x'] - node2['x'])**2 + (node1['y'] - node2['y'])**2)
+                if distance < self.connection_distance:
+                    line_color = "#00FF00" if (node1['active'] and node2['active']) else "#003300"
+                    line_width = 1 if (node1['active'] and node2['active']) else 0.5
+                    self.canvas.create_line(
+                        node1['x'], node1['y'],
+                        node2['x'], node2['y'],
+                        fill=line_color, width=line_width
+                    )
+        self.canvas.create_text(
+            self.width - 10, 10,
+            text=f"Active nodes: {self.active_nodes}/{self.node_count}",
+            fill="#00FF00", anchor="ne", font=("Courier", 10)
+        )
+        self.canvas.after(50, self.update)
+
+
+
+
+
+class HybridXRPLClient:
+    def __init__(self, ws_url: str, http_url: str):
+        self.ws_url = ws_url
+        self.http_url = http_url
+        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.json_client = JsonRpcClient(http_url)
+        self.connected = False
+        self.request_id = 0
+        self.callbacks: Dict[str, List[Callable]] = {}
+        self.pending_requests: Dict[int, asyncio.Future] = {}
+        self.logger = logging.getLogger("HybridXRPLClient")
+        self.loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._start_loop, daemon=True)
+        self._thread.start()
+        self.connection_task = None
+
+    def _start_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    async def connect(self):
+        try:
+            self.ws = await websockets.connect(self.ws_url)
+            self.connected = True
+            self.connection_task = asyncio.create_task(self._handle_messages())
+            self.logger.info(f"Connected to WebSocket at {self.ws_url}")
+        except Exception as e:
+            self.logger.error(f"WebSocket connection failed: {e}")
+            self.connected = False
+
+    async def _handle_messages(self):
+        try:
+            while True:
+                if self.ws is None:
+                    break
+                message = await self.ws.recv()
+                data = json.loads(message)
+                data = parse_response(data)
+                if 'id' in data:
+                    req_id = data['id']
+                    if req_id in self.pending_requests:
+                        fut = self.pending_requests.pop(req_id)
+                        fut.set_result(data)
+                if 'type' in data:
+                    event_type = data['type']
+                    if event_type in self.callbacks:
+                        for cb in self.callbacks[event_type]:
+                            try:
+                                await cb(data)
+                            except Exception as e:
+                                self.logger.error(f"Callback error: {e}")
+        except Exception as e:
+            self.logger.error(f"Error in handling messages: {e}")
+            await self.reconnect()
+
+    async def reconnect(self):
+        self.connected = False
+        if self.ws:
+            await self.ws.close()
+        retry = 0
+        max_retry = 5
+        while not self.connected and retry < max_retry:
+            try:
+                self.logger.info("Attempting to reconnect...")
+                await self.connect()
+                if self.connected:
+                    break
+            except Exception as e:
+                self.logger.error(f"Reconnection attempt failed: {e}")
+            retry += 1
+            await asyncio.sleep(2 ** retry)
+
+    def _get_request_id(self) -> int:
+        self.request_id += 1
+        return self.request_id
+
+    async def _send_ws_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.connected:
+            await self.connect()
+        req_id = self._get_request_id()
+        request['id'] = req_id
+        fut = self.loop.create_future()
+        self.pending_requests[req_id] = fut
+        await self.ws.send(json.dumps(request))
+        try:
+            response = await asyncio.wait_for(fut, timeout=10.0)
+            return response
+        except asyncio.TimeoutError:
+            self.pending_requests.pop(req_id, None)
+            raise TimeoutError("Request timed out")
+
+    def sync_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            if self.connected:
+                future = asyncio.run_coroutine_threadsafe(self._send_ws_request(request), self.loop)
+                return future.result(timeout=10)
+            else:
+                return self.json_client.request(request)
+        except KeyboardInterrupt:
+            self.logger.info("KeyboardInterrupt in sync_request; using HTTP fallback")
+            return self.json_client.request(request)
+        except Exception as e:
+            self.logger.error(f"Error in sync_request: {e}")
+            return self.json_client.request(request)
+
+
+
+
+class MatrixEscape:
+    def __init__(self, offline_mode=True):
+        self.endpoints = JSON_RPC_URLS[:]      # Endpoints HTTP
+        self.ws_endpoints = WEBSOCKET_URLS[:]    # Endpoints WebSocket
+        self.endpoint_cycle = cycle(self.endpoints)
+        self.ws_endpoint_cycle = cycle(self.ws_endpoints)
+        self.current_http = next(self.endpoint_cycle)
+        self.current_ws = next(self.ws_endpoint_cycle)
+        self.offline_mode = offline_mode
+        self.connection_status = False
+        self.connection_info = {"info": {"server_state": "OFFLINE MODE", "build_version": "LOCAL"}}
+        self.connection_latency = 0
+        self.ledger_info = {"ledger_current_index": "OFFLINE"}
+        self.server_state = {"state": "OFFLINE"}
+        self.failed_connections = 0
+
+        if not self.offline_mode:
+            self.hybrid_client = HybridXRPLClient(self.current_ws, self.current_http)
+            future = asyncio.run_coroutine_threadsafe(self.hybrid_client.connect(), self.hybrid_client.loop)
+            try:
+                future.result(timeout=5)
+            except Exception as e:
+                logger.error(f"Initial WS connection error: {e}")
+            self.monitoring_thread_running = True
+            self.monitoring_thread = threading.Thread(target=self.background_monitoring, daemon=True)
+            self.monitoring_thread.start()
+        else:
+            self.hybrid_client = None
+            self.monitoring_thread_running = False
+
+    def set_offline_mode(self, offline: bool):
+        if offline == self.offline_mode:
+            return
+        self.offline_mode = offline
+        if offline:
+            if hasattr(self, "monitoring_thread") and self.monitoring_thread_running:
+                self.monitoring_thread_running = False
+                self.monitoring_thread.join(timeout=1.0)
+            self.connection_status = False
+            self.connection_info = {"info": {"server_state": "OFFLINE MODE", "build_version": "LOCAL"}}
+            self.ledger_info = {"ledger_current_index": "OFFLINE"}
+        else:
+            if self.hybrid_client is None:
+                self.hybrid_client = HybridXRPLClient(self.current_ws, self.current_http)
+            def connect_async():
+                future = asyncio.run_coroutine_threadsafe(self.hybrid_client.connect(), self.hybrid_client.loop)
+                try:
+                    future.result(timeout=5)
+                except Exception as e:
+                    logger.error(f"Connection error when switching to online mode: {e}")
+                self.monitoring_thread_running = True
+                self.monitoring_thread = threading.Thread(target=self.background_monitoring, daemon=True)
+                self.monitoring_thread.start()
+            threading.Thread(target=connect_async, daemon=True).start()
+
+    def check_connection(self):
+        if self.offline_mode:
+            return False, {"error": "OFFLINE MODE ENABLED", "endpoint": "LOCAL"}
+        try:
+            start_time = time.time()
+            response = self.hybrid_client.sync_request({
+                "method": "server_info",
+                "params": [{}]
+            })
+            result = parse_response(response)
+            latency = round((time.time() - start_time) * 1000)
+            result['latency'] = latency
+            result['endpoint'] = self.current_http
+            self.connection_status = True
+            self.connection_info = result
+            self.connection_latency = latency
+            try:
+                ledger_response = self.hybrid_client.sync_request({
+                    "method": "ledger_current",
+                    "params": [{}]
+                })
+                self.ledger_info = parse_response(ledger_response)
+            except Exception as e:
+                logger.error(f"Error getting ledger info: {e}")
+            return True, result
+        except Exception as e:
+            error_message = f"XRPL connection error: {str(e)}"
+            logger.error(error_message)
+            self.connection_status = False
+            self.connection_info = {"error": error_message, "endpoint": self.current_http}
+            return False, self.connection_info
+
+    def background_monitoring(self):
+        while self.monitoring_thread_running:
+            try:
+                status, _ = self.check_connection()
+                if not status:
+                    self.failed_connections += 1
+                    if self.failed_connections >= 3:
+                        self.switch_endpoint()
+                else:
+                    self.failed_connections = 0
+                self.get_current_ledger()
+                self.get_server_state()
+                time.sleep(2)
+            except Exception as e:
+                logger.error(f"Monitoring thread error: {e}")
+                self.failed_connections += 1
+                if self.failed_connections >= 3:
+                    self.switch_endpoint()
+                time.sleep(5)
+
+    def switch_endpoint(self):
+        self.current_http = next(self.endpoint_cycle)
+        self.current_ws = next(self.ws_endpoint_cycle)
+        logger.info(f"Switching endpoints: HTTP: {self.current_http}, WS: {self.current_ws}")
+        self.hybrid_client = HybridXRPLClient(self.current_ws, self.current_http)
+        future = asyncio.run_coroutine_threadsafe(self.hybrid_client.connect(), self.hybrid_client.loop)
+        try:
+            future.result(timeout=10)
+        except Exception as e:
+            logger.error(f"Error connecting to new endpoint: {e}")
+        self.failed_connections = 0
+
+    def create_escape(self):
+        try:
+            new_wallet = Wallet.create()
+            return {
+                'address': new_wallet.classic_address,
+                'public_key': new_wallet.public_key,
+                'private_key': new_wallet.private_key,
+                'seed': new_wallet.seed,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+        except Exception as e:
+            raise Exception(f"Error creating ESCAPE: {str(e)}")
+
+    def get_server_state(self):
+        try:
+            response = self.hybrid_client.sync_request({
+                "method": "server_state",
+                "params": [{}]
+            })
+            self.server_state = parse_response(response)
+            return self.server_state
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_current_ledger(self):
+        try:
+            response = self.hybrid_client.sync_request({
+                "method": "ledger_current",
+                "params": [{}]
+            })
+            self.ledger_info = parse_response(response)
+            return self.ledger_info
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_network_load(self):
+        if self.connection_info and 'info' in self.connection_info:
+            info = self.connection_info['info']
+            return info.get('load_factor', 'unknown')
+        return "unknown"
+
+    def get_balance(self, address):
+        try:
+            response = self.hybrid_client.sync_request({
+                "method": "account_info",
+                "params": [{
+                    "account": address,
+                    "ledger_index": "validated",
+                    "strict": True
+                }]
+            })
+            result = parse_response(response)
+            balance = result.get("account_data", {}).get("Balance", "0")
+            return str(int(balance) / 1000000)
+        except Exception as e:
+            logger.error(f"Error getting balance: {e}")
+            return "0.00"
+
+    def send_xrp(self, sender_data, destination, amount):
+        try:
+            drops_amount = str(int(float(amount) * 1000000))
+            account_info_req = {
+                "method": "account_info",
+                "params": [{
+                    "account": sender_data['address'],
+                    "ledger_index": "validated",
+                    "strict": True
+                }]
+            }
+            account_info_response = self.hybrid_client.sync_request(account_info_req)
+            account_info_result = parse_response(account_info_response)
+            account_data = account_info_result.get("account_data", {})
+            sequence = account_data.get("Sequence")
+            if sequence is None:
+                raise Exception("Unable to retrieve account sequence")
+            payment = Payment(
+                account=sender_data['address'],
+                destination=destination,
+                amount=drops_amount,
+                fee="12",
+                sequence=sequence
+            )
+            wallet_obj = Wallet(seed=sender_data['seed'], sequence=sequence)
+            signed_tx = wallet_obj.sign(payment)
+            final_response = reliable_submission(signed_tx, self.hybrid_client.json_client)
+            return True, final_response
+        except Exception as e:
+            logger.error(f"Error sending XRP: {e}")
+            return False, str(e)
+
+    def get_transaction_history(self, address, limit=10):
+        try:
+            tx_history_req = {
+                "method": "account_tx",
+                "params": [{
+                    "account": address,
+                    "ledger_index_min": -1,
+                    "ledger_index_max": -1,
+                    "forward": False,
+                    "limit": limit
+                }]
+            }
+            response = self.hybrid_client.sync_request(tx_history_req)
+            result = parse_response(response)
+            transactions = []
+            for tx in result.get("transactions", []):
+                tx_obj = tx.get("tx", {})
+                tx_date = datetime.fromtimestamp(tx_obj.get("date", time.time())).strftime("%Y-%m-%d %H:%M:%S")
+                transactions.append({
+                    "date": tx_date,
+                    "type": tx_obj.get("TransactionType", "UNKNOWN"),
+                    "amount": (str(int(tx_obj.get("Amount", "0")) / 1000000) + " XRP") if tx_obj.get("Amount") else "0 XRP",
+                    "status": "VALIDATED" if tx.get("validated", False) else "PENDING"
+                })
+            return transactions
+        except Exception as e:
+            logger.error(f"Error getting transaction history: {e}")
+            return []
+
+    def get_connected_nodes(self):
+        try:
+            response = self.hybrid_client.sync_request({
+                "method": "peers",
+                "params": [{}]
+            })
+            result = parse_response(response)
+            if "peers" in result:
+                return len(result["peers"])
+            return "unknown"
+        except Exception as e:
+            logger.error(f"Error getting connected nodes: {e}")
+            return "unknown"
+
+
+
+class DoorWallet:
+    def __init__(self, escape_manager):
+        self.escape_manager = escape_manager
+
+    def create_door(self):
+        door_data = self.escape_manager.create_escape()
+        door_data['created_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        return door_data
+
+    def recover_door(self, seed: str):
+        try:
+            wallet = Wallet(seed=seed)
+            return {'address': wallet.classic_address, 'seed': seed}
+        except Exception as e:
+            raise Exception(f"Invalid seed: {str(e)}")
+
+class GlobeAnimation:
+    def __init__(self, canvas, width, height):
+        self.canvas = canvas
+        self.width = width
+        self.height = height
+        self.rotation = 0
+        self.num_markers = 12  # Nombre de marqueurs numériques
+        self.center_x = width // 2
+        self.center_y = height // 2
+        self.radius = int(min(width, height) * 0.3)  # Rayon du globe
+
+    def update(self):
+        self.canvas.delete("all")
+        # Dessiner le cercle du globe
+        self.canvas.create_oval(
+            self.center_x - self.radius, self.center_y - self.radius,
+            self.center_x + self.radius, self.center_y + self.radius,
+            outline="#00FF00", width=2
+        )
+        # Dessiner les marqueurs numériques tournants
+        for i in range(self.num_markers):
+            angle = 2 * math.pi * i / self.num_markers + self.rotation
+            x = self.center_x + self.radius * math.cos(angle)
+            y = self.center_y + self.radius * math.sin(angle)
+            digit = str((i + int(self.rotation * 10)) % 10)
+            self.canvas.create_text(x, y, text=digit, fill="#00FF00", font=("Courier", 14, "bold"))
+        self.rotation += 0.02
+        self.canvas.after(50, self.update)
+
+
+class EscapeGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("ESCAPE MATRIX")
+        self.root.geometry("1200x800")
+        self.root.configure(bg="black")
+        # Initialisation en mode offline par défaut
+        self.escape_manager = MatrixEscape(offline_mode=True)
+        self.door_wallet = DoorWallet(self.escape_manager)
+        self.current_escape = None  # Wallet actif
+        self.encrypted_seed = None
+        self.encryption_key = None
+        self.blink_state = False
+
+        self.create_interface()
+        self.root.after(100, self.start_updates)
+
+    def start_updates(self):
+        self.update_clock()
+        self.update_connection_indicator()
+        self.update_monitoring_panel()
+
+    def encrypt_seed(self, seed):
+        self.encryption_key = Fernet.generate_key()
+        fernet = Fernet(self.encryption_key)
+        return fernet.encrypt(seed.encode())
+
+    def decrypt_seed(self, encrypted_seed):
+        fernet = Fernet(self.encryption_key)
+        return fernet.decrypt(encrypted_seed).decode()
+
+    def create_interface(self):
+        self.main_frame = tk.Frame(self.root, bg="black")
+        self.main_frame.pack(expand=True, fill="both")
+        # Zone de menu à gauche
+        left_frame = tk.Frame(self.main_frame, bg="black", width=300)
+        left_frame.pack(side="left", fill="y", padx=20)
+        left_frame.pack_propagate(False)
+        self.create_header(left_frame)
+        self.create_main_menu(left_frame)
+        self.create_center_frame()
+
+    def create_header(self, parent):
+        header_frame = tk.Frame(parent, bg="black")
+        header_frame.pack(pady=(20, 5))
+        tk.Label(header_frame, text="ESCAPE", font=("Courier", 24, "bold"),
+                 fg="#00FF00", bg="black").pack(side="left", padx=5)
+        self.connection_indicator = tk.Canvas(header_frame, width=15, height=15,
+                                               bg="black", highlightthickness=0)
+        self.connection_indicator.pack(side="left", padx=5)
+        self.connection_status_text = tk.Label(parent, text="CHECKING CONNECTION...",
+                                               font=("Courier", 12), fg="#00FF00", bg="black")
+        self.connection_status_text.pack(pady=(0, 20))
+
+
+
+    def create_main_menu(self, parent):
+        menu_frame = tk.Frame(parent, bg="black")
+        menu_frame.pack(fill="both", padx=10, pady=10)
+        self.offline_status = tk.BooleanVar(value=True)
+        self.toggle_connection_btn = tk.Checkbutton(
+            menu_frame,
+            text="OFFLINE MODE",
+            variable=self.offline_status,
+            command=self.toggle_connection_mode,
+            font=("Courier", 12),
+            fg="#FFFF00", bg="black", selectcolor="black",
+            activebackground="black", activeforeground="#FFFF00"
+        )
+        self.toggle_connection_btn.pack(pady=5)
+        tk.Button(menu_frame, text="View Balance", width=20, font=("Courier", 12),
+                  fg="#00FF00", bg="black", command=self.view_balance).pack(pady=5)
+        tk.Button(menu_frame, text="Send XRP", width=20, font=("Courier", 12),
+                  fg="#00FF00", bg="black", command=self.send_xrp_ui).pack(pady=5)
+        tk.Button(menu_frame, text="Transaction History", width=20, font=("Courier", 12),
+                  fg="#00FF00", bg="black", command=self.show_history).pack(pady=5)
+        tk.Button(menu_frame, text="Disconnect", width=20, font=("Courier", 12),
+                  fg="#FF0000", bg="black", command=self.disconnect_escape).pack(pady=5)
+        tk.Button(menu_frame, text="Create Door", width=20, font=("Courier", 12),
+                  fg="#00FF00", bg="black", command=self.create_door_ui).pack(pady=5)
+        tk.Button(menu_frame, text="Open Door", width=20, font=("Courier", 12),
+                  fg="#00FF00", bg="black", command=self.open_door_ui).pack(pady=5)
+        tk.Button(menu_frame, text="Wallet Info", width=20, font=("Courier", 12),
+                  fg="#00FF00", bg="black", command=self.show_wallet_info).pack(pady=5)
+
+    def create_center_frame(self):
+        self.center_frame = tk.Frame(self.main_frame, bg="black")
+        self.center_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        self.animation_canvas = tk.Canvas(self.center_frame, bg="black", highlightthickness=0)
+        self.animation_canvas.pack(expand=True, fill="both")
+        # Démarrage de l'animation réseau via NetworkAnimation
+        self.network_animation = NetworkAnimation(
+            self.animation_canvas,
+            self.animation_canvas.winfo_reqwidth(),
+            self.animation_canvas.winfo_reqheight()
+        )
+        self.animation_canvas.after(50, self.network_animation.update)
+        self.create_monitoring_panel()
+        # Horloge en haut à droite
+        self.clock_label = tk.Label(self.center_frame, font=("Courier", 14), fg="#00FF00", bg="black")
+        self.clock_label.place(relx=1.0, rely=0, anchor="ne")
+
+    def create_monitoring_panel(self):
+        monitor_frame = tk.Frame(self.center_frame, bg="black", bd=2, relief="raised")
+        monitor_frame.place(relx=1.0, rely=1.0, anchor="se", width=400, height=200)
+        tk.Label(monitor_frame, text="NETWORK MONITORING", font=("Courier", 12, "bold"),
+                 fg="#00FF00", bg="black").pack(pady=(5, 10))
+        status_frame = tk.Frame(monitor_frame, bg="black")
+        status_frame.pack(fill="both", expand=True, padx=10)
+        self.monitoring_labels = {}
+        status_items = ["status", "latency", "server", "version", "ledger", "load", "nodes", "endpoint"]
+        for item in status_items:
+            self.monitoring_labels[item] = tk.Label(
+                status_frame, text=f"{item.upper()}: ...",
+                font=("Courier", 10), fg="#00FF00", bg="black",
+                anchor="w", justify="left"
+            )
+            self.monitoring_labels[item].pack(anchor="w", pady=2)
+
+
+
+
+    def toggle_connection_mode(self):
+        offline = self.offline_status.get()
+        status_text = "OFFLINE" if offline else "ONLINE"
+        self.escape_manager.set_offline_mode(offline)
+        self.toggle_connection_btn.config(text=f"{status_text} MODE")
+        if offline:
+            self.connection_status_text.config(text="OFFLINE MODE ENABLED")
+            for key in self.monitoring_labels:
+                self.monitoring_labels[key].config(fg="#FFFF00")
+            self.monitoring_labels["status"].config(text="STATUS: OFFLINE MODE")
+        else:
+            self.connection_status_text.config(text="ATTEMPTING CONNECTION...")
+
+    def show_wallet_info(self):
+        if self.current_escape:
+            info = f"Address: {self.current_escape.get('address')}\nCreated at: {self.current_escape.get('created_at')}"
+        else:
+            info = "No wallet loaded."
+        messagebox.showinfo("Wallet Info", info)
+
+    def update_clock(self):
+        now = datetime.now().strftime("%H:%M:%S")
+        self.clock_label.config(text=now)
+        self.root.after(1000, self.update_clock)
+
+    def update_connection_indicator(self):
+        try:
+            status, info = self.escape_manager.check_connection()
+            self.blink_state = not self.blink_state
+            color = "#00FF00" if status and self.blink_state else ("#FF0000" if not status and self.blink_state else "#000000")
+            self.connection_indicator.delete("all")
+            self.connection_indicator.create_oval(2, 2, 13, 13, fill=color, outline=color)
+            txt = "CONNECTED" if status else "DISCONNECTED"
+            self.connection_status_text.config(text=txt)
+            self.root.after(500, self.update_connection_indicator)
+        except Exception as e:
+            logger.error(f"Error updating connection indicator: {e}")
+            self.root.after(1000, self.update_connection_indicator)
+
+    def update_monitoring_panel(self):
+        try:
+            status, info = self.escape_manager.check_connection()
+            if status:
+                server_info = info.get("info", {})
+                self.monitoring_labels["status"].config(text="STATUS: CONNECTED", fg="#00FF00")
+                latency = self.escape_manager.connection_latency
+                latency_color = "#FF0000" if latency > 500 else ("#FFFF00" if latency > 200 else "#00FF00")
+                self.monitoring_labels["latency"].config(text=f"LATENCY: {latency} ms", fg=latency_color)
+                self.monitoring_labels["server"].config(text=f"SERVER: {server_info.get('server_state','UNKNOWN')}", fg="#00FF00")
+                self.monitoring_labels["version"].config(text=f"VERSION: {server_info.get('build_version','UNKNOWN')}", fg="#00FF00")
+                ledger_info = self.escape_manager.ledger_info
+                self.monitoring_labels["ledger"].config(text=f"LEDGER: {ledger_info.get('ledger_current_index','UNKNOWN')}", fg="#00FF00")
+                load = self.escape_manager.get_network_load()
+                self.monitoring_labels["load"].config(text=f"LOAD: {load}", fg="#00FF00")
+                nodes = self.escape_manager.get_connected_nodes()
+                self.monitoring_labels["nodes"].config(text=f"NODES: {nodes}", fg="#00FF00")
+                endpoint = info.get("endpoint", "UNKNOWN")
+                self.monitoring_labels["endpoint"].config(text=f"ENDPOINT: {endpoint}", fg="#00FF00")
+            self.root.after(2000, self.update_monitoring_panel)
+        except Exception as e:
+            logger.error(f"Error in update monitoring panel: {e}")
+            self.root.after(2000, self.update_monitoring_panel)
+
+    def view_balance(self):
+        if not self.current_escape:
+            messagebox.showerror("Error", "No wallet loaded!")
+            return
+        try:
+            balance = self.escape_manager.get_balance(self.current_escape.get("address"))
+            messagebox.showinfo("Balance", f"Balance: {balance} XRP")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error retrieving balance: {e}")
+
+    def send_xrp_ui(self):
+        if not self.current_escape:
+            messagebox.showerror("Error", "No wallet loaded!")
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Send XRP")
+        dialog.geometry("400x300")
+        dialog.configure(bg="black")
+        tk.Label(dialog, text="Destination Address:", font=("Courier", 12), fg="#00FF00", bg="black").pack(pady=10)
+        dest_entry = tk.Entry(dialog, font=("Courier", 12), fg="#00FF00", bg="#001100", width=40)
+        dest_entry.pack(pady=5)
+        tk.Label(dialog, text="Amount (XRP):", font=("Courier", 12), fg="#00FF00", bg="black").pack(pady=10)
+        amount_entry = tk.Entry(dialog, font=("Courier", 12), fg="#00FF00", bg="#001100", width=40)
+        amount_entry.pack(pady=5)
+
+        def send():
+            destination = dest_entry.get()
+            amount = amount_entry.get()
+            success, response = self.escape_manager.send_xrp(self.current_escape, destination, amount)
+            if success:
+                messagebox.showinfo("Success", "Transaction submitted successfully!")
+            else:
+                messagebox.showerror("Error", f"Transaction failed: {response}")
+            dialog.destroy()
+
+        tk.Button(dialog, text="Send XRP", font=("Courier", 12, "bold"),
+                  fg="#00FF00", bg="#003300", command=send).pack(pady=20)
+
+    def show_history(self):
+        if not self.current_escape:
+            messagebox.showerror("Error", "No wallet loaded!")
+            return
+        transactions = self.escape_manager.get_transaction_history(self.current_escape.get("address"))
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Transaction History")
+        dialog.geometry("600x400")
+        dialog.configure(bg="black")
+        text_area = tk.Text(dialog, font=("Courier", 10), fg="#00FF00", bg="#001100")
+        for tx in transactions:
+            text_area.insert("end", f"{tx['date']} - {tx['type']} - {tx['amount']} - {tx['status']}\n")
+        text_area.configure(state="disabled")
+        text_area.pack(expand=True, fill="both", padx=10, pady=10)
+
+    def disconnect_escape(self):
+        self.current_escape = None
+        self.encrypted_seed = None
+        self.encryption_key = None
+        messagebox.showinfo("Disconnected", "You have been disconnected from the wallet.")
+
+    def create_door_ui(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Create Door")
+        dialog.geometry("500x400")
+        dialog.configure(bg="black")
+        tk.Label(dialog, text="CREATE YOUR DOOR TO ESCAPE THE MATRIX",
+                 font=("Courier", 16, "bold"), fg="#00FF00", bg="black").pack(pady=20)
+
+        def create_door():
+            try:
+                door_data = self.door_wallet.create_door()
+                self.current_escape = door_data
+                dialog.destroy()
+                self.show_seed_backup(door_data)
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+        tk.Button(dialog, text="CREATE DOOR", 
+                  command=create_door,
+                  font=("Courier", 14, "bold"),
+                  fg="#00FF00", bg="#003300").pack(pady=20)
+
+    def show_seed_backup(self, door_data):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Door Seed")
+        dialog.geometry("600x300")
+        dialog.configure(bg="black")
+        tk.Label(dialog, text="IMPORTANT: Save this seed!",
+                 font=("Courier", 14, "bold"), fg="#FF0000", bg="black").pack(pady=20)
+        seed_text = tk.Text(dialog, height=4, width=40, font=("Courier", 12),
+                           fg="#00FF00", bg="#001100")
+        seed_text.insert("1.0", door_data['seed'])
+        seed_text.configure(state='disabled')
+        seed_text.pack(pady=20)
+
+    def open_door_ui(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Open Door")
+        dialog.geometry("500x300")
+        dialog.configure(bg="black")
+        tk.Label(dialog, text="ENTER YOUR SEED TO OPEN DOOR",
+                 font=("Courier", 16, "bold"), fg="#00FF00", bg="black").pack(pady=20)
+        seed_entry = tk.Entry(dialog, font=("Courier", 12), fg="#00FF00", bg="#001100", width=40)
+        seed_entry.pack(pady=20)
+
+        def recover_wallet():
+            seed = seed_entry.get()
+            try:
+                wallet_data = self.door_wallet.recover_door(seed)
+                self.current_escape = wallet_data
+                messagebox.showinfo("Success", "Door opened successfully")
+                dialog.destroy()
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+        tk.Button(dialog, text="OPEN DOOR",
+                  command=recover_wallet,
+                  font=("Courier", 14, "bold"), fg="#00FF00", bg="#003300").pack(pady=20)
+
+
+
+if __name__ == "__main__":
+    try:
+        root = tk.Tk()
+        root.title("ESCAPE MATRIX")
+        root.geometry("1200x800")
+        root.configure(bg="black")
+        app = EscapeGUI(root)
+        root.mainloop()
+    except Exception as e:
+        logger.error(f"Erreur critique: {e}", exc_info=True)
+        print(f"Erreur critique: {e}")
+
+
+
+
