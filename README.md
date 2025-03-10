@@ -117,6 +117,11 @@ Contributions are welcome. If you wish to enhance the code, fix bugs, or add new
 
 
 SUPPORT /No need support , Now i took my meds !!!! / Only contributing We never no what come next !?
+Or Maybe MUSIC TOKEN BECAUSE I LOVE MUSIC !!!
+
+https://music.gala.com/
+
+0x349b4Ca9Fe6F4fA16feDAb9c18f099dd5700cE3b
 
 preview
 https://www.youtube.com/@escape_404
