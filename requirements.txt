@@ -1,0 +1,6 @@
+streamlit>=1.28.0
+xrpl-py>=2.0.0
+cryptography>=36.0.0
+requests>=2.27.0
+websockets>=10.0
+tkinter

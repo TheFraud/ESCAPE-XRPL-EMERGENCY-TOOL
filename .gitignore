@@ -1,0 +1,35 @@
+# Environnements Python
+escape-env/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build et distribution
+build/
+dist/
+*.spec
+*.egg-info/
+
+# Fichiers temporaires et logs
+*.log
+*.wallet
+output.mp4
+nano
+
+# Dépendances téléchargées
+google-cloud-sdk/
+google-cloud-sdk-*.tar.gz
+git/
+
+# Fichiers avec des caractères étranges (semblent être des erreurs)
+=*/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
